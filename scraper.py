@@ -5,6 +5,14 @@ import json
 import re
 from datetime import datetime
 
+from parallel import ConcurrentPipeline
+from concurrent.futures.thread import ThreadPoolExecutor
+from concurrent.futures import as_completed
+
+
+from functools import partial
+from timeit import default_timer as timer
+
 link = 'http://www.issatso.rnu.tn/fo/emplois/emploi_groupe.php'
 
 
@@ -50,6 +58,7 @@ def scrapGroups(soup):
         print("Soup is empty")
 
 
+
 def requestEmploi(jeton, cookie, group, id):
     try:
 
@@ -59,9 +68,13 @@ def requestEmploi(jeton, cookie, group, id):
         data["id"] = id
 
         print("[+] Requesting emploi...")
+        currentTime = timer()
+
         response = requests.post(link, cookies=cookie, data=data)
+
+        elapsed = timer() - currentTime
         response.raise_for_status()
-        print("[+] Requesting succeded")
+        print("[+] Requesting succeded " + str(elapsed))
         return Bs(response.content, "html.parser")
     except HTTPError as err:
 
@@ -74,7 +87,7 @@ def requestEmploi(jeton, cookie, group, id):
         print('[-] Requesting failed.')
 
 
-def scrapEmploi(toScrap, group):
+def scrapEmploi(group,toScrap):
     res = {}
 
     htmlParsed = toScrap.select("div#dvContainer tbody tr")
@@ -150,33 +163,52 @@ def groupClass(group):
 
 
 def main():
+    current_time =timer()
 
-    soup = ""
-    jeton = ""
-    cookie = ""
-    timeOfRequest = ""
+    tokens = []
+    token_number = 50
+    tokensPipeline = ConcurrentPipeline(30)
 
-    soup, jeton, cookie = init()
-    groups = scrapGroups(soup)
+    for _ in range(0,token_number):
+        tokensPipeline.addToQueue(partial(init))
+    
+    tokens = tokensPipeline.result(asDic=False)
+    groups = scrapGroups(tokens[0][0])
 
-    file = open('./test.json', 'w')
     dic = {}
     dic["schedules"] = {}
     jsonContent = ""
+
+    pipeline = ConcurrentPipeline(50,50)
+
+    it = 0
+    for group in groups:
+        it = (it+1) % token_number
+        pipeline.addToQueue(
+            partial(requestEmploi,tokens[it][1],tokens[it][2], group[0], group[1]),
+            partial(scrapEmploi,group[0]))
+    
+    data = pipeline.result()
     for group in groups:
         classe = groupClass(group[0])
         if classe not in dic["schedules"]:
             dic["schedules"][classe] = {}
-
-        dic["schedules"][classe][group[0]] = {}
-        dic["schedules"][classe][group[0]] = scrapEmploi(requestEmploi(
-            jeton, cookie, group[0], group[1]), group[0])
+        matching = [s for s in data.keys() if group[0] in s]
+        dic["schedules"][classe][group[0]]= {}
+        temp = {}
+        for m in matching:
+            temp[m] = data[m]
+        dic["schedules"][classe][group[0]] = temp
 
     dic["updateTime"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
     jsonContent = json.dumps(dic, ensure_ascii=False)
+    file = open('./test.json', 'w')
     file.write(jsonContent)
     file.close()
-
+    
+    elapsed =timer() - current_time
+    print(str(elapsed))
 
 if __name__ == "__main__":
     main()
